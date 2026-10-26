@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Local-First WASM Engine</title>
+    <!-- Tailwind CSS for high-performance styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- SQLite WASM Client Library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/sql-wasm.js"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 h-screen flex flex-col overflow-hidden font-sans">
+
+    <!-- Top Navigation Bar -->
+    <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex justify-between items-center shadow-md">
+        <div class="flex items-center space-x-3">
+            <div class="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
+            <h1 class="text-lg font-bold tracking-tight text-slate-100">WASM Local-First Engine</h1>
+        </div>
+        <div class="flex items-center space-x-4">
+            <span id="db-status" class="text-xs px-3 py-1 bg-slate-800 text-slate-400 rounded-full border border-slate-700">Initializing WASM...</span>
+            <button onclick="exportDatabase()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium px-4 py-2 rounded-lg border border-slate-700 transition">Export DB</button>
+        </div>
+    </header>
+
+    <!-- Main Workspace -->
+    <main class="flex-1 flex overflow-hidden">
+        <!-- Sidebar / File List -->
+        <aside class="w-80 bg-slate-900/50 border-r border-slate-800 flex flex-col p-4">
+            <div class="flex justify-between items-center mb-4">
+                <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">Database Records</h2>
+                <button onclick="addRecord()" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-3 py-1.5 rounded-md font-medium transition">+ Add Row</button>
+            </div>
+            <div id="record-list" class="flex-1 overflow-y-auto space-y-2 pr-1">
+                <!-- Dynamically populated rows -->
+            </div>
+        </aside>
+
+        <!-- Editor / Interactive Area -->
+        <section class="flex-1 bg-slate-950 flex flex-col p-6">
+            <div class="mb-4">
+                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Active Record Payload (JSON / Markdown)</label>
+                <textarea id="record-content" class="w-full h-64 bg-slate-900 border border-slate-800 rounded-xl p-4 text-slate-200 font-mono text-sm focus:outline-none focus:border-slate-600 transition" placeholder="Select a record or add a new one..."></textarea>
+            </div>
+            <div class="flex justify-end space-x-3">
+                <button onclick="saveCurrentRecord()" class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-6 py-2.5 rounded-xl shadow-lg shadow-emerald-950/50 transition">Save Changes</button>
+            </div>
+        </section>
+    </main>
+
+    <!-- Core WASM Logic & State Management -->
+    <script>
+        let db = null;
+        let activeId = null;
+
+        async function initWasmDb() {
+            try {
+                const SQL = await initSqlJs({
+                    locateFile: file => `https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.8.0/${file}`
+                });
+                
+                db = new SQL.Database();
+                
+                // Create local table
+                db.run(`CREATE TABLE IF NOT EXISTS notes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    content TEXT,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );`);
+
+                // Insert seed data if empty
+                const res = db.exec("SELECT COUNT(*) FROM notes;");
+                if (res[0].values[0][0] === 0) {
+                    db.run("INSERT INTO notes (content) VALUES ('# Welcome to your Local-First WASM App\n\nEverything runs entirely in your browser memory.');");
+                    db.run("INSERT INTO notes (content) VALUES ('# Architecture Notes\n\n- Zero backend\n- Hosted on GitHub Pages\n- Instant execution');");
+                }
+
+                document.getElementById('db-status').textContent = 'WASM SQLite Active';
+                document.getElementById('db-status').className = 'text-xs px-3 py-1 bg-emerald-950/60 text-emerald-400 rounded-full border border-emerald-800/60';
+                
+                renderRecordList();
+            } catch (err) {
+                console.error(err);
+                document.getElementById('db-status').textContent = 'WASM Failed';
+            }
+        }
+
+        function renderRecordList() {
+            const listEl = document.getElementById('record-list');
+            listEl.innerHTML = '';
+            
+            const stmt = db.prepare("SELECT id, content FROM notes ORDER BY id DESC;");
+            while (stmt.step()) {
+                const row = stmt.get();
+                const id = row[0];
+                const content = row[1];
+                const preview = content.split('\n')[0].replace('#', '').trim() || `Record #${id}`;
+
+                const item = document.createElement('div');
+                item.className = `p-3 rounded-xl cursor-pointer border transition ${activeId === id ? 'bg-slate-800 border-slate-600 shadow-sm' : 'bg-slate-900/60 border-slate-800/80 hover:bg-slate-800/50'}`;
+                item.onclick = () => selectRecord(id);
+                item.innerHTML = `
+                    <div class="text-xs font-semibold text-slate-200 truncate">${preview}</div>
+                    <div class="text-[10px] text-slate-500 mt-1">ID: ${id}</div>
+                `;
+                listEl.appendChild(item);
+            }
+            stmt.free();
+        }
+
+        function selectRecord(id) {
+            activeId = id;
+            const stmt = db.prepare("SELECT content FROM notes WHERE id = :id;");
+            stmt.bind({ ':id': id });
+            if (stmt.step()) {
+                const row = stmt.get();
+                document.getElementById('record-content').value = row[0];
+            }
+            stmt.free();
+            renderRecordList();
+        }
+
+        function addRecord() {
+            db.run("INSERT INTO notes (content) VALUES ('# New Record\n\nStart typing here...');");
+            renderRecordList();
+            // Select the latest inserted record
+            const res = db.exec("SELECT MAX(id) FROM notes;");
+            selectRecord(res[0].values[0][0]);
+        }
+
+        function saveCurrentRecord() {
+            if (!activeId) return;
+            const content = document.getElementById('record-content').value;
+            const stmt = db.prepare("UPDATE notes SET content = :content, updated_at = CURRENT_TIMESTAMP WHERE id = :id;");
+            stmt.bind({ ':content': content, ':id': activeId });
+            stmt.run();
+            stmt.free();
+            renderRecordList();
+        }
+
+        function exportDatabase() {
+            const binaryArray = db.export();
+            const blob = new Blob([binaryArray], { type: 'application/x-sqlite3' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'local_database.sqlite';
+            a.click();
+        }
+
+        // Initialize on load
+        initWasmDb();
+    </script>
+</body>
+</html>
