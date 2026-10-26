@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Local-First WASM Engine</title>
+    <title>WASM Local-First Engine + Knowledge Graph</title>
     <!-- Tailwind CSS for high-performance styling -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- SQLite WASM Client Library -->
@@ -12,21 +12,28 @@
 <body class="bg-slate-950 text-slate-100 h-screen flex flex-col overflow-hidden font-sans">
 
     <!-- Top Navigation Bar -->
-    <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex justify-between items-center shadow-md">
+    <header class="bg-slate-900 border-b border-slate-800 px-6 py-4 flex justify-between items-center shadow-md z-10">
         <div class="flex items-center space-x-3">
             <div class="w-3 h-3 bg-emerald-500 rounded-full animate-pulse"></div>
             <h1 class="text-lg font-bold tracking-tight text-slate-100">WASM Local-First Engine</h1>
         </div>
-        <div class="flex items-center space-x-4">
+        <div class="flex items-center space-x-3">
+            <!-- View Mode Switcher -->
+            <div class="bg-slate-950 p-1 rounded-lg border border-slate-800 flex space-x-1">
+                <button onclick="switchView('editor')" id="btn-view-editor" class="text-xs px-3 py-1.5 rounded-md font-medium bg-slate-800 text-slate-200 transition">Editor</button>
+                <button onclick="switchView('graph')" id="btn-view-graph" class="text-xs px-3 py-1.5 rounded-md font-medium text-slate-400 hover:text-slate-200 transition">Graph View</button>
+            </div>
+            <span id="folder-badge" class="text-xs px-3 py-1 bg-slate-800 text-slate-400 rounded-full border border-slate-700">No Folder Linked</span>
+            <button onclick="pickLocalDirectory()" class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium px-4 py-2 rounded-lg transition shadow-sm">📁 Open Folder</button>
             <span id="db-status" class="text-xs px-3 py-1 bg-slate-800 text-slate-400 rounded-full border border-slate-700">Initializing WASM...</span>
             <button onclick="exportDatabase()" class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium px-4 py-2 rounded-lg border border-slate-700 transition">Export DB</button>
         </div>
     </header>
 
     <!-- Main Workspace -->
-    <main class="flex-1 flex overflow-hidden">
+    <main class="flex-1 flex overflow-hidden relative">
         <!-- Sidebar / File List -->
-        <aside class="w-80 bg-slate-900/50 border-r border-slate-800 flex flex-col p-4">
+        <aside class="w-80 bg-slate-900/50 border-r border-slate-800 flex flex-col p-4 z-10">
             <div class="flex justify-between items-center mb-4">
                 <h2 class="text-xs font-semibold uppercase tracking-wider text-slate-400">Database Records</h2>
                 <button onclick="addRecord()" class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs px-3 py-1.5 rounded-md font-medium transition">+ Add Row</button>
@@ -36,22 +43,41 @@
             </div>
         </aside>
 
-        <!-- Editor / Interactive Area -->
-        <section class="flex-1 bg-slate-950 flex flex-col p-6">
-            <div class="mb-4">
-                <label class="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">Active Record Payload (JSON / Markdown)</label>
-                <textarea id="record-content" class="w-full h-64 bg-slate-900 border border-slate-800 rounded-xl p-4 text-slate-200 font-mono text-sm focus:outline-none focus:border-slate-600 transition" placeholder="Select a record or add a new one..."></textarea>
+        <!-- View 1: Editor Workspace -->
+        <section id="view-editor" class="flex-1 bg-slate-950 flex flex-col p-6">
+            <div class="mb-4 flex justify-between items-center">
+                <label id="active-filename" class="block text-xs font-semibold uppercase tracking-wider text-slate-400">Active Record Payload</label>
+                <span id="save-status" class="text-[10px] text-slate-500">Unsaved changes</span>
             </div>
-            <div class="flex justify-end space-x-3">
+            <div class="flex-1 flex flex-col">
+                <textarea id="record-content" oninput="markUnsaved()" class="w-full flex-1 bg-slate-900 border border-slate-800 rounded-xl p-4 text-slate-200 font-mono text-sm focus:outline-none focus:border-slate-600 transition resize-none" placeholder="Select a record or add a new one..."></textarea>
+            </div>
+            <div class="flex justify-end space-x-3 mt-4">
                 <button onclick="saveCurrentRecord()" class="bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold px-6 py-2.5 rounded-xl shadow-lg shadow-emerald-950/50 transition">Save Changes</button>
             </div>
         </section>
+
+        <!-- View 2: Interactive Knowledge Graph Canvas -->
+        <section id="view-graph" class="flex-1 bg-slate-950 hidden relative flex flex-col">
+            <div class="absolute top-4 left-4 z-10 bg-slate-900/80 backdrop-blur border border-slate-800 px-4 py-2 rounded-xl text-xs text-slate-400">
+                💡 <span class="text-slate-200">Interactive Graph:</span> Nodes represent notes. Connected lines indicate shared tags or links. Click any node to open it.
+            </div>
+            <canvas id="graph-canvas" class="w-full h-full cursor-grab active:cursor-grabbing"></canvas>
+        </section>
     </main>
 
-    <!-- Core WASM Logic & State Management -->
+    <!-- Core WASM, File System, & Graph Engine Logic -->
     <script>
         let db = null;
         let activeId = null;
+        let rootDirHandle = null;
+        let currentView = 'editor';
+
+        // Graph simulation state
+        let graphNodes = [];
+        let graphLinks = [];
+        let canvas, ctx;
+        let draggedNode = null;
 
         async function initWasmDb() {
             try {
@@ -61,27 +87,78 @@
                 
                 db = new SQL.Database();
                 
-                // Create local table
                 db.run(`CREATE TABLE IF NOT EXISTS notes (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT DEFAULT 'note.md',
                     content TEXT,
                     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
                 );`);
 
-                // Insert seed data if empty
                 const res = db.exec("SELECT COUNT(*) FROM notes;");
                 if (res[0].values[0][0] === 0) {
-                    db.run("INSERT INTO notes (content) VALUES ('# Welcome to your Local-First WASM App\n\nEverything runs entirely in your browser memory.');");
-                    db.run("INSERT INTO notes (content) VALUES ('# Architecture Notes\n\n- Zero backend\n- Hosted on GitHub Pages\n- Instant execution');");
+                    db.run("INSERT INTO notes (filename, content) VALUES ('welcome.md', '# Welcome\n\nLink to #architecture and #wasm');");
+                    db.run("INSERT INTO notes (filename, content) VALUES ('architecture.md', '# Architecture Notes\n\nPowered by #wasm and sqlite.');");
+                    db.run("INSERT INTO notes (filename, content) VALUES ('wasm.md', '# WebAssembly\n\nHigh speed execution core for #wasm applications.');");
                 }
 
                 document.getElementById('db-status').textContent = 'WASM SQLite Active';
                 document.getElementById('db-status').className = 'text-xs px-3 py-1 bg-emerald-950/60 text-emerald-400 rounded-full border border-emerald-800/60';
                 
                 renderRecordList();
+                initCanvas();
             } catch (err) {
                 console.error(err);
                 document.getElementById('db-status').textContent = 'WASM Failed';
+            }
+        }
+
+        function switchView(view) {
+            currentView = view;
+            const editorEl = document.getElementById('view-editor');
+            const graphEl = document.getElementById('view-graph');
+            const btnEditor = document.getElementById('btn-view-editor');
+            const btnGraph = document.getElementById('btn-view-graph');
+
+            if (view === 'editor') {
+                editorEl.classList.remove('hidden');
+                graphEl.classList.add('hidden');
+                btnEditor.className = 'text-xs px-3 py-1.5 rounded-md font-medium bg-slate-800 text-slate-200 transition';
+                btnGraph.className = 'text-xs px-3 py-1.5 rounded-md font-medium text-slate-400 hover:text-slate-200 transition';
+            } else {
+                editorEl.classList.add('hidden');
+                graphEl.classList.remove('hidden');
+                btnGraph.className = 'text-xs px-3 py-1.5 rounded-md font-medium bg-slate-800 text-slate-200 transition';
+                btnEditor.className = 'text-xs px-3 py-1.5 rounded-md font-medium text-slate-400 hover:text-slate-200 transition';
+                resizeCanvas();
+                buildGraphData();
+            }
+        }
+
+        async function pickLocalDirectory() {
+            try {
+                rootDirHandle = await window.showDirectoryPicker();
+                document.getElementById('folder-badge').textContent = `Dir: ${rootDirHandle.name}`;
+                document.getElementById('folder-badge').className = 'text-xs px-3 py-1 bg-indigo-950/60 text-indigo-400 rounded-full border border-indigo-800/60';
+                
+                for await (const entry of rootDirHandle.values()) {
+                    if (entry.kind === 'file' && entry.name.endsWith('.md')) {
+                        const file = await entry.getFile();
+                        const content = await file.text();
+                        
+                        const stmt = db.prepare("SELECT id FROM notes WHERE filename = :filename;");
+                        stmt.bind({ ':filename': entry.name });
+                        if (!stmt.step()) {
+                            const insert = db.prepare("INSERT INTO notes (filename, content) VALUES (:filename, :content);");
+                            insert.run({ ':filename': entry.name, ':content': content });
+                            insert.free();
+                        }
+                        stmt.free();
+                    }
+                }
+                renderRecordList();
+                if (currentView === 'graph') buildGraphData();
+            } catch (err) {
+                console.log('Directory selection cancelled.', err);
             }
         }
 
@@ -89,19 +166,26 @@
             const listEl = document.getElementById('record-list');
             listEl.innerHTML = '';
             
-            const stmt = db.prepare("SELECT id, content FROM notes ORDER BY id DESC;");
+            const stmt = db.prepare("SELECT id, filename, content FROM notes ORDER BY id DESC;");
             while (stmt.step()) {
                 const row = stmt.get();
                 const id = row[0];
-                const content = row[1];
-                const preview = content.split('\n')[0].replace('#', '').trim() || `Record #${id}`;
+                const filename = row[1];
+                const content = row[2];
+                const preview = content.split('\n')[0].replace('#', '').trim() || filename;
 
                 const item = document.createElement('div');
                 item.className = `p-3 rounded-xl cursor-pointer border transition ${activeId === id ? 'bg-slate-800 border-slate-600 shadow-sm' : 'bg-slate-900/60 border-slate-800/80 hover:bg-slate-800/50'}`;
-                item.onclick = () => selectRecord(id);
+                item.onclick = () => {
+                    selectRecord(id);
+                    switchView('editor');
+                };
                 item.innerHTML = `
                     <div class="text-xs font-semibold text-slate-200 truncate">${preview}</div>
-                    <div class="text-[10px] text-slate-500 mt-1">ID: ${id}</div>
+                    <div class="text-[10px] text-slate-500 mt-1 flex justify-between">
+                        <span>${filename}</span>
+                        <span>ID: ${id}</span>
+                    </div>
                 `;
                 listEl.appendChild(item);
             }
@@ -110,32 +194,74 @@
 
         function selectRecord(id) {
             activeId = id;
-            const stmt = db.prepare("SELECT content FROM notes WHERE id = :id;");
+            const stmt = db.prepare("SELECT filename, content FROM notes WHERE id = :id;");
             stmt.bind({ ':id': id });
             if (stmt.step()) {
                 const row = stmt.get();
-                document.getElementById('record-content').value = row[0];
+                document.getElementById('active-filename').textContent = `Editing: ${row[0]}`;
+                document.getElementById('record-content').value = row[1];
+                document.getElementById('save-status').textContent = 'Saved';
             }
             stmt.free();
             renderRecordList();
         }
 
-        function addRecord() {
-            db.run("INSERT INTO notes (content) VALUES ('# New Record\n\nStart typing here...');");
-            renderRecordList();
-            // Select the latest inserted record
-            const res = db.exec("SELECT MAX(id) FROM notes;");
-            selectRecord(res[0].values[0][0]);
+        function markUnsaved() {
+            document.getElementById('save-status').textContent = 'Unsaved changes...';
         }
 
-        function saveCurrentRecord() {
+        async function addRecord() {
+            const filename = `note_${Date.now()}.md`;
+            const defaultContent = '# New Document\n\nAdd tags like #idea here...';
+            
+            const stmt = db.prepare("INSERT INTO notes (filename, content) VALUES (:filename, :content);");
+            stmt.run({ ':filename': filename, ':content': defaultContent });
+            stmt.free();
+            
+            renderRecordList();
+            if (currentView === 'graph') buildGraphData();
+
+            if (rootDirHandle) {
+                try {
+                    const fileHandle = await rootDirHandle.getFileHandle(filename, { create: true });
+                    const writable = await fileHandle.createWritable();
+                    await writable.write(defaultContent);
+                    await writable.close();
+                } catch (err) { console.error(err); }
+            }
+
+            const res = db.exec("SELECT MAX(id) FROM notes;");
+            selectRecord(res[0].values[0][0]);
+            switchView('editor');
+        }
+
+        async function saveCurrentRecord() {
             if (!activeId) return;
             const content = document.getElementById('record-content').value;
+            
             const stmt = db.prepare("UPDATE notes SET content = :content, updated_at = CURRENT_TIMESTAMP WHERE id = :id;");
             stmt.bind({ ':content': content, ':id': activeId });
             stmt.run();
             stmt.free();
+
+            const fileStmt = db.prepare("SELECT filename FROM notes WHERE id = :id;");
+            fileStmt.bind({ ':id': activeId });
+            if (fileStmt.step()) {
+                const filename = fileStmt.get()[0];
+                if (rootDirHandle) {
+                    try {
+                        const fileHandle = await rootDirHandle.getFileHandle(filename, { create: true });
+                        const writable = await fileHandle.createWritable();
+                        await writable.write(content);
+                        await writable.close();
+                    } catch (err) { console.error(err); }
+                }
+            }
+            fileStmt.free();
+
+            document.getElementById('save-status').textContent = 'Saved to memory & disk';
             renderRecordList();
+            if (currentView === 'graph') buildGraphData();
         }
 
         function exportDatabase() {
@@ -148,7 +274,202 @@
             a.click();
         }
 
-        // Initialize on load
+        // --- Knowledge Graph Canvas Engine ---
+        function initCanvas() {
+            canvas = document.getElementById('graph-canvas');
+            ctx = canvas.getContext('2d');
+            window.addEventListener('resize', resizeCanvas);
+
+            canvas.addEventListener('mousedown', onCanvasMouseDown);
+            canvas.addEventListener('mousemove', onCanvasMouseMove);
+            window.addEventListener('mouseup', onCanvasMouseUp);
+
+            requestAnimationFrame(loop);
+        }
+
+        function resizeCanvas() {
+            if (!canvas) return;
+            canvas.width = canvas.parentElement.clientWidth;
+            canvas.height = canvas.parentElement.clientHeight;
+        }
+
+        function buildGraphData() {
+            graphNodes = [];
+            graphLinks = [];
+            const tagMap = {};
+
+            const stmt = db.prepare("SELECT id, filename, content FROM notes;");
+            while (stmt.step()) {
+                const row = stmt.get();
+                const id = row[0];
+                const filename = row[1];
+                const content = row[2];
+                const title = content.split('\n')[0].replace('#', '').trim() || filename;
+
+                const node = {
+                    id: id,
+                    label: title,
+                    x: canvas.width / 2 + (Math.random() - 0.5) * 200,
+                    y: canvas.height / 2 + (Math.random() - 0.5) * 200,
+                    vx: 0,
+                    vy: 0,
+                    radius: 20
+                };
+                graphNodes.push(node);
+
+                // Extract tags (#tag) to build links between documents
+                const tags = content.match(/#[a-zA-Z0-9_-]+/g) || [];
+                tags.forEach(tag => {
+                    if (!tagMap[tag]) tagMap[tag] = [];
+                    tagMap[tag].push(node);
+                });
+            }
+            stmt.free();
+
+            // Link nodes that share the same tag
+            Object.values(tagMap).forEach(group => {
+                for (let i = 0; i < group.length; i++) {
+                    for (let j = i + 1; j < group.length; j++) {
+                        graphLinks.push({ source: group[i], target: group[j] });
+                    }
+                }
+            });
+        }
+
+        function loop() {
+            if (currentView === 'graph') {
+                updatePhysics();
+                drawGraph();
+            }
+            requestAnimationFrame(loop);
+        }
+
+        function updatePhysics() {
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+
+            // Center gravity & repulsion
+            for (let i = 0; i < graphNodes.length; i++) {
+                let n1 = graphNodes[i];
+                if (n1 === draggedNode) continue;
+
+                // Pull toward center
+                n1.vx += (centerX - n1.x) * 0.01;
+                n1.vy += (centerY - n1.y) * 0.01;
+
+                // Repulsion between nodes
+                for (let j = i + 1; j < graphNodes.length; j++) {
+                    let n2 = graphNodes[j];
+                    let dx = n2.x - n1.x;
+                    let dy = n2.y - n1.y;
+                    let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                    if (dist < 120) {
+                        let force = (120 - dist) / dist * 0.5;
+                        n1.vx -= dx * force;
+                        n1.vy -= dy * force;
+                        n2.vx += dx * force;
+                        n2.vy += dy * force;
+                    }
+                }
+            }
+
+            // Link spring forces
+            graphLinks.forEach(link => {
+                let dx = link.target.x - link.source.x;
+                let dy = link.target.y - link.source.y;
+                let dist = Math.sqrt(dx * dx + dy * dy) || 1;
+                let spring = (dist - 100) * 0.03;
+                
+                if (link.source !== draggedNode) {
+                    link.source.vx += dx * spring / dist;
+                    link.source.vy += dy * spring / dist;
+                }
+                if (link.target !== draggedNode) {
+                    link.target.vx -= dx * spring / dist;
+                    link.target.vy -= dy * spring / dist;
+                }
+            });
+
+            // Apply velocity with damping
+            graphNodes.forEach(node => {
+                if (node === draggedNode) return;
+                node.vx *= 0.85;
+                node.vy *= 0.85;
+                node.x += node.vx;
+                node.y += node.vy;
+            });
+        }
+
+        function drawGraph() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw links
+            ctx.strokeStyle = '#334155';
+            ctx.lineWidth = 1.5;
+            graphLinks.forEach(link => {
+                ctx.beginPath();
+                ctx.moveTo(link.source.x, link.source.y);
+                ctx.lineTo(link.target.x, link.target.y);
+                ctx.stroke();
+            });
+
+            // Draw nodes
+            graphNodes.forEach(node => {
+                ctx.fillStyle = node.id === activeId ? '#10b981' : '#1e293b';
+                ctx.strokeStyle = node.id === activeId ? '#34d399' : '#475569';
+                ctx.lineWidth = 2;
+
+                ctx.beginPath();
+                ctx.arc(node.x, node.y, node.radius, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.stroke();
+
+                // Draw label
+                ctx.fillStyle = '#cbd5e1';
+                ctx.font = '11px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(node.label, node.x, node.y + node.radius + 16);
+            });
+        }
+
+        function onCanvasMouseDown(e) {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            for (let node of graphNodes) {
+                let dx = mouseX - node.x;
+                let dy = mouseY - node.y;
+                if (Math.sqrt(dx * dx + dy * dy) < node.radius) {
+                    draggedNode = node;
+                    selectRecord(node.id);
+                    break;
+                }
+            }
+        }
+
+        function onCanvasMouseMove(e) {
+            if (!draggedNode) return;
+            const rect = canvas.getBoundingClientRect();
+            draggedNode.x = e.clientX - rect.left;
+            draggedNode.y = e.clientY - rect.top;
+            draggedNode.vx = 0;
+            draggedNode.vy = 0;
+        }
+
+        function onCanvasMouseUp(e) {
+            // If clicked without dragging, switch to editor view for that note
+            if (draggedNode) {
+                const rect = canvas.getBoundingClientRect();
+                let dx = (e.clientX - rect.left) - draggedNode.x;
+                let dy = (e.clientY - rect.top) - draggedNode.y;
+                if (Math.sqrt(dx * dx + dy * dy) < draggedNode.radius + 5) {
+                    switchView('editor');
+                }
+            }
+            draggedNode = null;
+        }
+
         initWasmDb();
     </script>
 </body>
